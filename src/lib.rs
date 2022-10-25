@@ -26,22 +26,66 @@ where
     }
 }
 
+pub trait Movement<'a, 'b, VocabElement, StackData, Q>
+where
+    'a: 'b,
+{
+    fn f(
+        &'a self,
+        state: &Q,
+        v: &Option<VocabElement>,
+        s: &StackData,
+    ) -> Option<&'b (Q, Vec<StackData>)>;
+}
+
 pub type Movements<VocabElement, StackData, Q> =
     HashMap<(Q, Option<VocabElement>, StackData), (Q, Vec<StackData>)>;
 
-#[derive(Debug, Clone)]
-pub struct AutomataBuilder<VocabElement, StackData, Q> {
-    state: Q,
-    stack: Stack<StackData>,
-    movements: Movements<VocabElement, StackData, Q>,
+impl<'a, 'b, VocabElement, StackData, Q> Movement<'a, 'b, VocabElement, StackData, Q>
+    for Movements<VocabElement, StackData, Q>
+where
+    (Q, Option<VocabElement>, StackData): Hash + Eq,
+    StackData: Clone,
+    Q: Clone,
+    VocabElement: Clone,
+    'a: 'b,
+{
+    fn f(
+        &'a self,
+        state: &Q,
+        v: &Option<VocabElement>,
+        s: &StackData,
+    ) -> Option<&'b (Q, Vec<StackData>)> {
+        self.get(&(state.clone(), v.clone(), s.clone()))
+    }
 }
 
-impl<VocabElement, StackData, Q> AutomataBuilder<VocabElement, StackData, Q> {
-    pub fn new<S>(
-        initial_state: Q,
-        initial_stack: S,
-        movements: Movements<VocabElement, StackData, Q>,
-    ) -> Self
+impl<'a, 'b, VocabElement, StackData, Q, F> Movement<'a, 'b, VocabElement, StackData, Q> for F
+where
+    F: Fn(&Q, &Option<VocabElement>, &StackData) -> Option<&'b (Q, Vec<StackData>)> + 'a,
+    StackData: 'b,
+    Q: 'b,
+    'a: 'b,
+{
+    fn f(
+        &'a self,
+        state: &Q,
+        v: &Option<VocabElement>,
+        s: &StackData,
+    ) -> Option<&'b (Q, Vec<StackData>)> {
+        self(state, v, s)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomataBuilder<StackData, Q, M> {
+    state: Q,
+    stack: Stack<StackData>,
+    movements: M,
+}
+
+impl<StackData, Q, M> AutomataBuilder<StackData, Q, M> {
+    pub fn new<S>(initial_state: Q, initial_stack: S, movements: M) -> Self
     where
         S: Into<Stack<StackData>>,
     {
@@ -52,12 +96,14 @@ impl<VocabElement, StackData, Q> AutomataBuilder<VocabElement, StackData, Q> {
         }
     }
 
-    pub fn build<W>(&self, word: W) -> Automata<VocabElement, StackData, Q, W>
+    pub fn build<'a, 'b, V, W>(&self, word: W) -> Automata<V, StackData, Q, W, M>
     where
-        W: Iterator<Item = VocabElement>,
+        W: Iterator<Item = V>,
         Q: Clone,
         StackData: Clone,
-        Movements<VocabElement, StackData, Q>: Clone,
+        M: Clone,
+        M: Movement<'a, 'b, V, StackData, Q>,
+        'a: 'b,
     {
         Automata::new(
             word,
@@ -69,14 +115,14 @@ impl<VocabElement, StackData, Q> AutomataBuilder<VocabElement, StackData, Q> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Automata<VocabElement, StackData, Q, Word>
+pub struct Automata<VocabElement, StackData, Q, Word, M>
 where
     Word: Iterator<Item = VocabElement>,
 {
-    state: Option<Q>,
+    state: Q,
     stack: Stack<StackData>,
     word: Word,
-    movements: Movements<VocabElement, StackData, Q>,
+    movements: M,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,42 +132,39 @@ pub enum AutomataResult {
     NotAccepting,
 }
 
-impl<VocabElement, StackData, Q, Word> Automata<VocabElement, StackData, Q, Word>
+impl<VocabElement, StackData, Q, Word, M> Automata<VocabElement, StackData, Q, Word, M>
 where
     Word: Iterator<Item = VocabElement>,
 {
-    pub fn new<S>(
-        word: Word,
-        initial_state: Q,
-        initial_stack: S,
-        movements: Movements<VocabElement, StackData, Q>,
-    ) -> Self
+    pub fn new<S>(word: Word, initial_state: Q, initial_stack: S, movements: M) -> Self
     where
         S: Into<Stack<StackData>>,
     {
         Self {
-            state: Some(initial_state),
+            state: initial_state,
             stack: initial_stack.into(),
             word,
             movements,
         }
     }
 
-    pub fn run(&mut self) -> AutomataResult
+    pub fn run<'a, 'b>(&mut self) -> AutomataResult
     where
         (Q, Option<VocabElement>, StackData): Hash + Eq,
         StackData: Clone,
         Q: Clone,
+        M: Movement<'a, 'b, VocabElement, StackData, Q>,
+        'a: 'b,
     {
         let v = self.word.next();
         let s = self.stack.pop();
         match (v, s) {
             (None, None) => AutomataResult::Accept,
             (v, Some(s)) => {
-                let m = self.movements.get(&(self.state.take().unwrap(), v, s));
+                let m = self.movements.f(&self.state, &v, &s).cloned();
 
                 if let Some((state, new_stack)) = m {
-                    self.state = Some(state.clone());
+                    self.state = state.clone();
                     for elem in new_stack.iter().rev() {
                         self.stack.push(elem.clone());
                     }
@@ -134,11 +177,14 @@ where
         }
     }
 
-    pub fn complete(mut self) -> bool
+    pub fn complete<'a, 'b>(mut self) -> bool
     where
         (Q, Option<VocabElement>, StackData): Hash + Eq,
         StackData: Clone,
         Q: Clone,
+        M: Movement<'a, 'b, VocabElement, StackData, Q>,
+        'a: 'b,
+        Self: 'a,
     {
         let mut r = AutomataResult::Processing;
         while r == AutomataResult::Processing {
